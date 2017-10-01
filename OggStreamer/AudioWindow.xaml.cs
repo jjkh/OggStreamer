@@ -20,6 +20,8 @@ using CSCore.SoundIn;
 using CSCore.CoreAudioAPI;
 using System.IO;
 using System.Diagnostics;
+using System.Net.Sockets;
+using System.Net;
 
 namespace OggStreamer
 {
@@ -33,7 +35,7 @@ namespace OggStreamer
         private IWaveSource _finalSource;
         private Process _oggEncProcess;
         private AsyncStreamChunker _stdOut;
-        private FileStream _fs;
+        private AsyncTcpListener _tcpListener;
 
         public AudioWindow()
         {
@@ -45,6 +47,7 @@ namespace OggStreamer
             if (_looping)
             {
                 StopAudioLoopback();
+
                 LoopbackButton.Content = "Loopback Audio";
                 _looping = false;
             }
@@ -67,14 +70,10 @@ namespace OggStreamer
             _oggEncProcess.StandardOutput.Close();
             _oggEncProcess.WaitForExit();
             _oggEncProcess.Dispose();
-            _fs.Dispose();
         }
 
         private void StartAudioLoopback()
         {
-            _soundIn = new WasapiLoopbackCapture();
-            _soundIn.Initialize();
-
             _oggEncProcess = new Process();
             _oggEncProcess.StartInfo.UseShellExecute = false;
             _oggEncProcess.StartInfo.RedirectStandardInput = true;
@@ -84,10 +83,11 @@ namespace OggStreamer
             _oggEncProcess.StartInfo.CreateNoWindow = true;
             _oggEncProcess.Start();
 
+            _soundIn = new WasapiLoopbackCapture();
+            _soundIn.Initialize();
             var soundInSource = new SoundInSource(_soundIn);
             var singleBlockNotificationStream = new SingleBlockNotificationStream(soundInSource.ToSampleSource());
             _finalSource = singleBlockNotificationStream.ToWaveSource();
-
 
             byte[] inBuffer = new byte[_finalSource.WaveFormat.BytesPerSecond / 2];
             soundInSource.DataAvailable += (s, _) =>
@@ -96,14 +96,15 @@ namespace OggStreamer
                 while ((read = _finalSource.Read(inBuffer, 0, inBuffer.Length)) > 0)
                     _oggEncProcess.StandardInput.BaseStream.Write(inBuffer, 0, read);
             };
-            _soundIn.Start();
 
-            _fs = new FileStream("y3.ogg", FileMode.Create);
-
+            _tcpListener = new AsyncTcpListener();
+            _tcpListener.ClientConnected += (s, _) =>
+            {
+                _soundIn.Start();
+            };
             _stdOut = new AsyncStreamChunker(_oggEncProcess.StandardOutput);
-            _stdOut.DataReceived += (s, data) => _fs.Write(data, 0, 512);
-
-            _stdOut.Start();
+            _stdOut.DataReceived += (s, data) => _tcpListener.Write(data, 0, 512);
+                _stdOut.Start();
         }
     }
     
@@ -171,6 +172,75 @@ namespace OggStreamer
 
             // wait for more data from stream
             BeginReadAsync();
+        }
+    }
+
+    class AsyncTcpListener : Stream
+    {
+        private Socket _serverSocket;
+        private Socket _clientSocket = null;
+        public Socket ClientSocket { get => _clientSocket; }
+        public event EventHandler ClientConnected;
+
+        public override bool CanRead => throw new NotImplementedException();
+
+        public override bool CanSeek => throw new NotImplementedException();
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotImplementedException();
+
+        public override long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+
+        public AsyncTcpListener(int port = 7777)
+        {
+            IPEndPoint localEndPoint = new IPEndPoint(IPAddress.Any, port);
+            _serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+            _serverSocket.Bind(localEndPoint);
+            _serverSocket.Listen(1);
+            _serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), _serverSocket);
+        }
+
+        private void AcceptCallback(IAsyncResult result)
+        {
+            _clientSocket = _serverSocket.EndAccept(result);
+            Console.WriteLine("client connected");
+            ClientConnected.Invoke(this, null);
+            _clientSocket.Receive(new byte[4096]);
+        }
+
+        private void SendCallback(IAsyncResult result)
+        {
+            Console.Write(".");
+        }
+
+        public override void Flush()
+        {
+            throw new NotImplementedException();
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (_clientSocket == null)
+                return;
+
+            _clientSocket.BeginSend(buffer, offset, count, SocketFlags.None, new AsyncCallback(SendCallback), _clientSocket);
         }
     }
 }
